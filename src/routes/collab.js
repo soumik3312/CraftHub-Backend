@@ -5,7 +5,10 @@ const User = require('../models/User');
 const { authRequired } = require('../middleware/auth');
 const { toPublicUser } = require('../utils/toPublicUser');
 const { publicUrl } = require('../utils/publicUrl');
-const { autoCreateProjectWorkspace } = require('../utils/projectWorkspace');
+const {
+  autoCreateProjectWorkspace,
+  ensureProjectWorkspaceConversation,
+} = require('../utils/projectWorkspace');
 const { ensureDirectConversation } = require('../utils/directConversation');
 
 const router = express.Router();
@@ -324,24 +327,50 @@ router.post('/requests/:id/accept', authRequired, async (req, res) => {
 
     if (r.status === 'pending') {
       if (String(r.toUserId) !== String(req.userId)) {
-        return res.status(403).json({ error: 'Only the recipient can accept this request first' });
+        return res.status(403).json({ error: 'Only the recipient can accept this request.' });
       }
-      r.status = 'accepted';
+      r.status = 'connected';
       await r.save();
+      await finalizeConnection(r);
+      const workspaceChatResult = r.projectId
+        ? await ensureProjectWorkspaceConversation(req, r.projectId, {
+            triggeredByUserId: req.userId,
+          })
+        : { created: false };
+      const workspaceResult = r.projectId
+        ? await autoCreateProjectWorkspace(req, r.projectId, {
+            triggeredByUserId: req.userId,
+          })
+        : { created: false };
       return res.json({
         ok: true,
         status: r.status,
-        message: 'First acceptance complete. Waiting for the sender to confirm.',
+        message: workspaceResult.created
+          ? 'Collaboration connected. Workspace chat, shared repo, and editor are ready.'
+          : workspaceResult.reason === 'too_many_collaborators'
+            ? 'Collaboration connected. Workspace chat is ready, but shared repos are limited to 4 members.'
+            : workspaceResult.reason === 'owner_github_missing' ||
+                workspaceResult.reason === 'collaborator_github_missing' ||
+                workspaceResult.reason === 'not_configured'
+              ? 'Collaboration connected. Workspace chat is ready. Connect GitHub on all project members to unlock the shared repo and editor.'
+              : workspaceChatResult.created
+                ? 'Collaboration connected. Workspace chat is ready.'
+                : 'Collaboration connected.',
       });
     }
 
     if (r.status === 'accepted') {
       if (String(r.fromUserId) !== String(req.userId)) {
-        return res.status(403).json({ error: 'Only the sender can confirm after the recipient accepts' });
+        return res.status(403).json({ error: 'Only the sender can finish this older collaboration request.' });
       }
       r.status = 'connected';
       await r.save();
       await finalizeConnection(r);
+      const workspaceChatResult = r.projectId
+        ? await ensureProjectWorkspaceConversation(req, r.projectId, {
+            triggeredByUserId: req.userId,
+          })
+        : { created: false };
       const workspaceResult = r.projectId
         ? await autoCreateProjectWorkspace(req, r.projectId, { triggeredByUserId: req.userId })
         : { created: false };
@@ -349,10 +378,10 @@ router.post('/requests/:id/accept', authRequired, async (req, res) => {
         ok: true,
         status: r.status,
         message: workspaceResult.created
-          ? 'Collaboration connected. Chat and shared GitHub workspace are now ready.'
-          : workspaceResult.reason === 'too_many_collaborators'
-            ? 'Collaboration connected, but the project has more than 4 members so the shared workspace was not created.'
-          : 'Collaboration connected. Chat is now available.',
+          ? 'Collaboration connected. Workspace chat, shared repo, and editor are ready.'
+          : workspaceChatResult.created
+            ? 'Collaboration connected. Workspace chat is ready.'
+            : 'Collaboration connected.',
       });
     }
 

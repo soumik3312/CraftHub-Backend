@@ -54,27 +54,43 @@ async function ensureWorkspaceConversation(project) {
   }
 
   if (!conv) {
-    return Conversation.create({
-      type: 'group',
-      name: `${project.title} Workspace`,
-      participantIds,
-      memberState: participantIds.map((id) => ({ userId: id, lastReadAt: new Date() })),
-      projectId: project._id,
-      lastMessageAt: new Date(),
-    });
+    return {
+      created: true,
+      conversation: await Conversation.create({
+        type: 'group',
+        name: `${project.title} Workspace`,
+        participantIds,
+        memberState: participantIds.map((id) => ({ userId: id, lastReadAt: new Date() })),
+        projectId: project._id,
+        lastMessageAt: new Date(),
+      }),
+    };
   }
 
   const known = new Set((conv.participantIds || []).map((id) => String(id)));
+  let changed = false;
   for (const id of participantIds) {
     if (!known.has(String(id))) {
       conv.participantIds.push(id);
       conv.memberState.push({ userId: id, lastReadAt: new Date() });
+      changed = true;
     }
   }
-  conv.name = `${project.title} Workspace`;
-  conv.projectId = project._id;
-  await conv.save();
-  return conv;
+  if (conv.name !== `${project.title} Workspace`) {
+    conv.name = `${project.title} Workspace`;
+    changed = true;
+  }
+  if (String(conv.projectId || '') !== String(project._id)) {
+    conv.projectId = project._id;
+    changed = true;
+  }
+  if (changed) {
+    await conv.save();
+  }
+  return {
+    created: false,
+    conversation: conv,
+  };
 }
 
 async function postWorkspaceStarterMessage(req, conversationId, senderId, text) {
@@ -110,6 +126,47 @@ async function postWorkspaceStarterMessage(req, conversationId, senderId, text) 
       });
     }
   }
+}
+
+async function ensureProjectWorkspaceConversation(req, projectOrId, { triggeredByUserId = null } = {}) {
+  const project =
+    typeof projectOrId === 'string' || projectOrId instanceof mongoose.Types.ObjectId
+      ? await Project.findById(projectOrId)
+      : projectOrId;
+  if (!project) return { created: false, reason: 'project_missing' };
+
+  if (projectMemberCount(project) <= 1) {
+    return { created: false, reason: 'no_collaborators', project };
+  }
+
+  const hadConversationId = String(project.workspace?.conversationId || '').trim();
+  const ensured = await ensureWorkspaceConversation(project);
+  const conversation = ensured.conversation;
+  const existingWorkspace =
+    project.workspace?.toObject ? project.workspace.toObject() : project.workspace || {};
+  project.workspace = {
+    ...existingWorkspace,
+    conversationId: conversation._id,
+    createdByUserId: existingWorkspace.createdByUserId || triggeredByUserId || project.ownerId,
+    createdAt: existingWorkspace.createdAt || new Date(),
+  };
+  project.updatedAt = new Date();
+  await project.save();
+
+  if (!hadConversationId) {
+    await postWorkspaceStarterMessage(
+      req,
+      conversation._id,
+      triggeredByUserId || project.ownerId,
+      `Workspace chat ready for "${project.title}". Connect GitHub on all members to unlock the shared repo and editor.`
+    );
+  }
+
+  return {
+    created: !hadConversationId,
+    project,
+    conversationId: String(conversation._id),
+  };
 }
 
 async function autoCreateProjectWorkspace(req, projectOrId, { triggeredByUserId = null, requireOwnerRequest = false } = {}) {
@@ -210,7 +267,11 @@ async function autoCreateProjectWorkspace(req, projectOrId, { triggeredByUserId 
     }
   }
 
-  const conversation = await ensureWorkspaceConversation(project);
+  const ensuredConversation = await ensureProjectWorkspaceConversation(req, project, {
+    triggeredByUserId,
+  });
+  const conversationId =
+    ensuredConversation.conversationId || String(project.workspace?.conversationId || '');
   project.workspace = {
     provider: 'github',
     requestedRepoName: project.workspace?.requestedRepoName || '',
@@ -220,9 +281,9 @@ async function autoCreateProjectWorkspace(req, projectOrId, { triggeredByUserId 
     repoUrl: String(repo.html_url || ''),
     editorUrl: githubEditorUrl(String(repo.owner.login || ''), String(repo.name || slugRepoName(baseRepoName))),
     defaultBranch: String(repo.default_branch || 'main'),
-    conversationId: conversation._id,
+    conversationId: conversationId || null,
     createdByUserId: triggeredByUserId || project.ownerId,
-    createdAt: new Date(),
+    createdAt: project.workspace?.createdAt || new Date(),
     contributions: project.workspace?.contributions || [],
   };
   project.githubUrl = project.workspace.repoUrl;
@@ -231,7 +292,7 @@ async function autoCreateProjectWorkspace(req, projectOrId, { triggeredByUserId 
 
   await postWorkspaceStarterMessage(
     req,
-    conversation._id,
+    project.workspace.conversationId,
     triggeredByUserId || project.ownerId,
     `GitHub workspace ready for "${project.title}". Repo: ${project.workspace.repoUrl} Editor: ${project.workspace.editorUrl}`
   );
@@ -240,7 +301,7 @@ async function autoCreateProjectWorkspace(req, projectOrId, { triggeredByUserId 
     created: true,
     reason: 'created',
     project,
-    conversationId: String(conversation._id),
+    conversationId: String(project.workspace.conversationId),
   };
 }
 
@@ -278,4 +339,5 @@ async function autoCreateEligibleWorkspacesForUser(req, userId) {
 module.exports = {
   autoCreateEligibleWorkspacesForUser,
   autoCreateProjectWorkspace,
+  ensureProjectWorkspaceConversation,
 };
