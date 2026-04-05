@@ -16,6 +16,38 @@ const {
 } = require('../utils/githubApi');
 
 const router = express.Router();
+const githubOauthFlows = new Map();
+const GITHUB_FLOW_TTL_MS = 20 * 60 * 1000;
+
+function pruneGithubOauthFlows() {
+  const now = Date.now();
+  for (const [token, flow] of githubOauthFlows.entries()) {
+    if (!flow || now - flow.updatedAt > GITHUB_FLOW_TTL_MS) {
+      githubOauthFlows.delete(token);
+    }
+  }
+}
+
+function beginGithubOauthFlow(stateToken, userId) {
+  pruneGithubOauthFlows();
+  githubOauthFlows.set(stateToken, {
+    userId: String(userId),
+    status: 'pending',
+    message: 'Waiting for GitHub authorization.',
+    updatedAt: Date.now(),
+  });
+}
+
+function updateGithubOauthFlow(stateToken, status, message) {
+  if (!stateToken) return;
+  const existing = githubOauthFlows.get(stateToken);
+  githubOauthFlows.set(stateToken, {
+    userId: String(existing?.userId || ''),
+    status: status === 'success' ? 'success' : 'error',
+    message: String(message || (status === 'success' ? 'GitHub account connected.' : 'GitHub connection failed.')),
+    updatedAt: Date.now(),
+  });
+}
 
 function signGithubState(userId) {
   return jwt.sign(
@@ -50,12 +82,16 @@ function oauthCompletePage(status, message) {
       .card { max-width: 420px; padding: 24px; border-radius: 18px; background: #1c1c1c; border: 1px solid #333; text-align: center; }
       h1 { margin: 0 0 12px; font-size: 22px; }
       p { margin: 0; line-height: 1.5; color: #ddd; }
+      .hint { margin-top: 14px; font-size: 14px; color: #b8b8b8; }
+      button { margin-top: 18px; padding: 11px 16px; border: 0; border-radius: 999px; background: #fff; color: #111; font-weight: 700; cursor: pointer; }
     </style>
   </head>
   <body>
     <div class="card">
       <h1>${safeStatus === 'success' ? 'GitHub connected' : 'GitHub connection failed'}</h1>
       <p>${safeMessage}</p>
+      <p class="hint">You can close this browser and return to CraftHub.</p>
+      <button type="button" onclick="window.close()">Close</button>
     </div>
   </body>
 </html>`;
@@ -187,24 +223,60 @@ router.post('/connect/start', authRequired, async (req, res) => {
       });
     }
     const state = signGithubState(req.userId);
+    beginGithubOauthFlow(state, req.userId);
     res.json({
       authorizeUrl: githubAuthorizeUrl({ req, state }),
       completeUrl: githubCompleteUrl(req, 'success').split('?')[0],
+      flowToken: state,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
+router.get('/connect/poll', authRequired, async (req, res) => {
+  try {
+    const state = String(req.query.state || '').trim();
+    if (!state) {
+      return res.status(400).json({ error: 'Missing GitHub flow token.' });
+    }
+
+    const payload = verifyGithubState(state);
+    if (String(payload.sub) !== String(req.userId)) {
+      return res.status(403).json({ error: 'This GitHub flow does not belong to the signed-in user.' });
+    }
+
+    pruneGithubOauthFlows();
+    const flow = githubOauthFlows.get(state);
+    if (!flow) {
+      return res.json({
+        status: 'expired',
+        message: 'GitHub authorization session expired. Please try again.',
+      });
+    }
+
+    return res.json({
+      status: flow.status,
+      message: flow.message,
+    });
+  } catch (e) {
+    return res.status(400).json({
+      error: e.message || 'GitHub flow is invalid or expired.',
+    });
+  }
+});
+
 router.get('/oauth/callback', async (req, res) => {
+  const state = String(req.query.state || '').trim();
   try {
     if (!githubConfigured()) {
+      updateGithubOauthFlow(state, 'error', 'GitHub integration is not configured on the server.');
       return res.redirect(githubCompleteUrl(req, 'error', 'GitHub integration is not configured on the server.'));
     }
 
     const code = String(req.query.code || '').trim();
-    const state = String(req.query.state || '').trim();
     if (!code || !state) {
+      updateGithubOauthFlow(state, 'error', 'GitHub did not return the required OAuth data.');
       return res.redirect(githubCompleteUrl(req, 'error', 'GitHub did not return the required OAuth data.'));
     }
 
@@ -214,6 +286,7 @@ router.get('/oauth/callback', async (req, res) => {
 
     const user = await User.findById(payload.sub);
     if (!user) {
+      updateGithubOauthFlow(state, 'error', 'The Craft Hub user could not be found.');
       return res.redirect(githubCompleteUrl(req, 'error', 'The Craft Hub user could not be found.'));
     }
 
@@ -229,8 +302,10 @@ router.get('/oauth/callback', async (req, res) => {
       ? `Connected as ${user.githubUsername || 'GitHub user'}. Workspace auto-created for ${created.length} project${created.length == 1 ? '' : 's'}.`
       : `Connected as ${user.githubUsername || 'GitHub user'}.`;
 
+    updateGithubOauthFlow(state, 'success', message);
     return res.redirect(githubCompleteUrl(req, 'success', message));
   } catch (e) {
+    updateGithubOauthFlow(state, 'error', e.message || 'GitHub connection failed.');
     return res.redirect(githubCompleteUrl(req, 'error', e.message || 'GitHub connection failed.'));
   }
 });
