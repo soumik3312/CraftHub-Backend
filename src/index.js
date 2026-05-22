@@ -38,6 +38,7 @@ const io = new Server(server, {
 });
 
 app.set('io', io);
+app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS || 1));
 
 io.use((socket, next) => {
   try {
