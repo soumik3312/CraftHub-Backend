@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const { authRequired } = require('../middleware/auth');
 const { toPublicUser } = require('../utils/toPublicUser');
+const { emitSyncEvent } = require('../utils/syncEvents');
 const { autoCreateEligibleWorkspacesForUser } = require('../utils/projectWorkspace');
 const {
   exchangeGithubCode,
@@ -297,7 +298,15 @@ router.get('/oauth/callback', async (req, res) => {
     user.githubAccessToken = accessToken;
     await user.save();
 
+    // OAuth callbacks are authenticated by the signed state token rather than
+    // authRequired, so expose the verified actor to the shared sync emitter.
+    req.userId = String(user._id);
+
     const created = await autoCreateEligibleWorkspacesForUser(req, user._id);
+    emitSyncEvent(req, 'github', 'connected', user._id);
+    for (const workspace of created) {
+      emitSyncEvent(req, 'workspace', 'created', workspace.projectId);
+    }
     const message = created.length
       ? `Connected as ${user.githubUsername || 'GitHub user'}. Workspace auto-created for ${created.length} project${created.length == 1 ? '' : 's'}.`
       : `Connected as ${user.githubUsername || 'GitHub user'}.`;
@@ -327,6 +336,8 @@ router.post('/disconnect', authRequired, async (req, res) => {
     user.githubProfileUrl = '';
     user.githubAccessToken = '';
     await user.save();
+
+    emitSyncEvent(req, 'github', 'disconnected', user._id);
 
     res.json({ ok: true, user: toPublicUser(req, user) });
   } catch (e) {

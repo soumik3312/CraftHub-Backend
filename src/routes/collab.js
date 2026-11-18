@@ -1,4 +1,5 @@
 const express = require('express');
+const { emitSyncEvent } = require('../utils/syncEvents');
 const CollabRequest = require('../models/CollabRequest');
 const Project = require('../models/Project');
 const User = require('../models/User');
@@ -268,6 +269,7 @@ router.post('/requests', authRequired, async (req, res) => {
       message,
       status: 'pending',
     });
+    emitSyncEvent(req, 'collaboration', 'requested', doc._id);
     const conversation = await ensureDirectConversation(req.userId, toUserId);
     const populated = await CollabRequest.findById(doc._id)
       .populate('fromUserId', 'name username avatarUrl')
@@ -332,6 +334,7 @@ router.post('/requests/:id/accept', authRequired, async (req, res) => {
       r.status = 'connected';
       await r.save();
       await finalizeConnection(r);
+      emitSyncEvent(req, 'collaboration', 'connected', r.projectId || r._id);
       const workspaceChatResult = r.projectId
         ? await ensureProjectWorkspaceConversation(req, r.projectId, {
             triggeredByUserId: req.userId,
@@ -366,6 +369,7 @@ router.post('/requests/:id/accept', authRequired, async (req, res) => {
       r.status = 'connected';
       await r.save();
       await finalizeConnection(r);
+      emitSyncEvent(req, 'collaboration', 'connected', r.projectId || r._id);
       const workspaceChatResult = r.projectId
         ? await ensureProjectWorkspaceConversation(req, r.projectId, {
             triggeredByUserId: req.userId,
@@ -401,6 +405,7 @@ router.post('/requests/:id/reject', authRequired, async (req, res) => {
     if (r.status !== 'pending') return res.status(400).json({ error: 'Already handled' });
     r.status = 'rejected';
     await r.save();
+    emitSyncEvent(req, 'collaboration', 'rejected', r._id);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });

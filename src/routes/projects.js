@@ -1,4 +1,5 @@
 const express = require('express');
+const { emitSyncEvent } = require('../utils/syncEvents');
 const mongoose = require('mongoose');
 const Project = require('../models/Project');
 const User = require('../models/User');
@@ -36,13 +37,16 @@ function toPublicProject(req, p) {
     };
   }
   const workspace = o.workspace || {};
+  const viewerIsProjectMember = [o.ownerId, ...(o.collaboratorIds || [])]
+    .map((member) => toIdString(member))
+    .includes(String(req.userId));
   const contributions = (workspace.contributions || []).map((entry) => ({
     userId: toIdString(entry.userId),
     commitCount: Number(entry.commitCount || 0),
     lastSavedAt: entry.lastSavedAt || null,
     lastFilePath: entry.lastFilePath || '',
   }));
-  o.workspace = {
+  const publicWorkspace = {
     provider: workspace.provider || '',
     requestedRepoName: workspace.requestedRepoName || '',
     repoOwner: workspace.repoOwner || '',
@@ -60,7 +64,14 @@ function toPublicProject(req, p) {
       0
     ),
   };
-  o.githubUrl = o.githubUrl || o.workspace.repoUrl || '';
+  // Shared workspace repositories and their chat ids are private to accepted
+  // collaborators. Public project viewers only need to know whether one exists.
+  o.workspace = viewerIsProjectMember
+    ? publicWorkspace
+    : { ready: Boolean(publicWorkspace.repoUrl) };
+  // A workspace repo is private by design. Do not expose either its URL or an
+  // older mirrored githubUrl field to viewers who are not project members.
+  o.githubUrl = viewerIsProjectMember ? (o.githubUrl || publicWorkspace.repoUrl) : '';
   o.techStack = (o.techStack || []).map((entry) => String(entry || '').trim()).filter(Boolean);
   o.likeCount = (o.likeUserIds || []).length;
   o.commentCount = (o.comments || []).length;
@@ -179,6 +190,7 @@ router.get('/mine', authRequired, async (req, res) => {
   try {
     const owned = await Project.find({ ownerId: req.userId })
       .sort({ updatedAt: -1 })
+      .populate('ownerId', 'name username avatarUrl githubConnected githubUsername githubProfileUrl')
       .populate('collaboratorIds', 'name username avatarUrl githubConnected githubUsername githubProfileUrl');
     const collab = await Project.find({
       collaboratorIds: req.userId,
@@ -279,6 +291,7 @@ router.post('/:id/comment', authRequired, async (req, res) => {
     );
     const comment = project.comments[project.comments.length - 1];
 
+    emitSyncEvent(req, 'project', 'commented', req.params.id);
     res.status(201).json({
       comment: toPublicProjectComment(
         req,
@@ -300,6 +313,7 @@ router.post('/:id/like', authRequired, async (req, res) => {
     current.add(String(req.userId));
     project.likeUserIds = [...current];
     await project.save();
+    emitSyncEvent(req, 'project', 'liked', project._id);
     res.json({
       likeCount: (project.likeUserIds || []).length,
       likedByMe: true,
@@ -317,6 +331,7 @@ router.delete('/:id/like', authRequired, async (req, res) => {
       (id) => String(id) !== String(req.userId)
     );
     await project.save();
+    emitSyncEvent(req, 'project', 'unliked', project._id);
     res.json({
       likeCount: (project.likeUserIds || []).length,
       likedByMe: false,
@@ -362,6 +377,8 @@ router.post('/:id/workspace/create', authRequired, async (req, res) => {
       .populate('ownerId', 'name username avatarUrl bio genres githubConnected githubUsername githubProfileUrl')
       .populate('collaboratorIds', 'name username avatarUrl githubConnected githubUsername githubProfileUrl');
 
+    emitSyncEvent(req, 'workspace', result.created ? 'created' : 'available', projectId);
+
     res.status(result.created ? 201 : 200).json({
       project: {
         ...toPublicProject(req, populated),
@@ -403,6 +420,7 @@ router.patch('/:id/workspace/name', authRequired, async (req, res) => {
       .populate('ownerId', 'name username avatarUrl bio genres githubConnected githubUsername githubProfileUrl')
       .populate('collaboratorIds', 'name username avatarUrl githubConnected githubUsername githubProfileUrl');
 
+    emitSyncEvent(req, 'project', 'updated', project._id);
     res.json({
       project: {
         ...toPublicProject(req, populated),
@@ -510,6 +528,7 @@ router.put('/:id/workspace/file', authRequired, async (req, res) => {
     access.project.updatedAt = new Date();
     await access.project.save();
 
+    emitSyncEvent(req, 'workspace', 'file_saved', access.project._id);
     res.json({
       ok: true,
       path: pathValue,
@@ -593,6 +612,7 @@ router.post('/', authRequired, (req, res, next) => {
     const populated = await Project.findById(project._id)
       .populate('ownerId', 'name username avatarUrl githubConnected githubUsername githubProfileUrl')
       .populate('collaboratorIds', 'name username avatarUrl githubConnected githubUsername githubProfileUrl');
+    emitSyncEvent(req, 'project', 'created', project._id);
     res.status(201).json({
       project: {
         ...toPublicProject(req, populated),
@@ -713,6 +733,7 @@ router.patch('/:id', authRequired, (req, res, next) => {
     const populated = await Project.findById(project._id)
       .populate('ownerId', 'name username avatarUrl githubConnected githubUsername githubProfileUrl')
       .populate('collaboratorIds', 'name username avatarUrl githubConnected githubUsername githubProfileUrl');
+    emitSyncEvent(req, 'project', 'updated', project._id);
     res.json({
       project: {
         ...toPublicProject(req, populated),
@@ -733,6 +754,7 @@ router.delete('/:id', authRequired, async (req, res) => {
       return res.status(403).json({ error: 'Only owner can delete' });
     }
     await Project.deleteOne({ _id: project._id });
+    emitSyncEvent(req, 'project', 'deleted', project._id);
     await Promise.all(
       (project.imageUrls || []).map((url, index) =>
         deleteStoredAsset({

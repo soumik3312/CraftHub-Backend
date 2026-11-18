@@ -1,4 +1,5 @@
 const express = require('express');
+const { emitSyncEvent } = require('../utils/syncEvents');
 const User = require('../models/User');
 const Follow = require('../models/Follow');
 const Project = require('../models/Project');
@@ -121,6 +122,7 @@ router.patch('/me', authRequired, (req, res, next) => {
       await deleteStoredAsset(previousAvatar);
     }
 
+    emitSyncEvent(req, 'profile', 'updated', user._id);
     res.json({ user: toPublicUser(req, user) });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
@@ -172,6 +174,7 @@ router.patch('/me/settings', authRequired, async (req, res) => {
     await user.save();
 
     const publicUser = toPublicUser(req, user);
+    emitSyncEvent(req, 'settings', 'updated', user._id);
     res.json({
       settings: publicUser.settings,
       user: publicUser,
@@ -255,6 +258,7 @@ router.post('/:id/follow', authRequired, async (req, res) => {
       { $setOnInsert: { followerId: req.userId, followingId } },
       { upsert: true }
     );
+    emitSyncEvent(req, 'follow', 'created', followingId);
     res.json({ ok: true });
   } catch (e) {
     if (e.code === 11000) return res.json({ ok: true });
@@ -265,6 +269,7 @@ router.post('/:id/follow', authRequired, async (req, res) => {
 router.delete('/:id/follow', authRequired, async (req, res) => {
   try {
     await Follow.deleteOne({ followerId: req.userId, followingId: req.params.id });
+    emitSyncEvent(req, 'follow', 'deleted', req.params.id);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });

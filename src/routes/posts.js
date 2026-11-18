@@ -1,4 +1,5 @@
 const express = require('express');
+const { emitSyncEvent } = require('../utils/syncEvents');
 const Post = require('../models/Post');
 const Comment = require('../models/Comment');
 const Follow = require('../models/Follow');
@@ -80,6 +81,7 @@ router.post('/', authRequired, (req, res, next) => {
       sharesCount: 0,
     });
     const populated = await Post.findById(post._id).populate('authorId', 'name username avatarUrl');
+    emitSyncEvent(req, 'post', 'created', post._id);
     res.status(201).json({ post: toPublicPost(req, populated, req.userId) });
   } catch (e) {
     console.error('[posts.create] upload failed:', e.message);
@@ -146,6 +148,7 @@ router.get('/:id', authRequired, async (req, res) => {
 router.post('/:id/like', authRequired, async (req, res) => {
   try {
     await Post.updateOne({ _id: req.params.id }, { $addToSet: { likeUserIds: req.userId } });
+    emitSyncEvent(req, 'post', 'liked', req.params.id);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -155,6 +158,7 @@ router.post('/:id/like', authRequired, async (req, res) => {
 router.delete('/:id/like', authRequired, async (req, res) => {
   try {
     await Post.updateOne({ _id: req.params.id }, { $pull: { likeUserIds: req.userId } });
+    emitSyncEvent(req, 'post', 'unliked', req.params.id);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -209,6 +213,7 @@ router.post('/:id/comment', authRequired, async (req, res) => {
     });
     const populated = await Comment.findById(c._id).populate('authorId', 'name username avatarUrl');
     const o = populated.toObject();
+    emitSyncEvent(req, 'post', 'commented', req.params.id);
     res.status(201).json({
       comment: {
         id: String(o._id),
@@ -235,6 +240,7 @@ router.post('/:id/suggest', authRequired, async (req, res) => {
     });
     const populated = await Comment.findById(c._id).populate('authorId', 'name username avatarUrl');
     const o = populated.toObject();
+    emitSyncEvent(req, 'post', 'suggested', req.params.id);
     res.status(201).json({
       suggestion: {
         id: String(o._id),
@@ -267,6 +273,7 @@ router.delete('/:id', authRequired, async (req, res) => {
         })
       )
     );
+    emitSyncEvent(req, 'post', 'deleted', req.params.id);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });

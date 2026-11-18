@@ -8,6 +8,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
+const Conversation = require('./models/Conversation');
 
 dotenv.config();
 const fallbackGithubEnvPath = path.join(__dirname, '..', '.env.github');
@@ -54,9 +55,19 @@ io.use((socket, next) => {
 
 io.on('connection', (socket) => {
   socket.join(`user:${socket.userId}`);
-  socket.on('join', (conversationId) => {
-    if (!conversationId) return;
-    socket.join(`conv:${conversationId}`);
+  socket.on('join', async (conversationId, acknowledge) => {
+    if (!conversationId) return acknowledge?.({ ok: false, error: 'Conversation id required' });
+    try {
+      const conversation = await Conversation.exists({
+        _id: conversationId,
+        participantIds: socket.userId,
+      });
+      if (!conversation) return acknowledge?.({ ok: false, error: 'Forbidden' });
+      socket.join(`conv:${conversationId}`);
+      acknowledge?.({ ok: true });
+    } catch {
+      acknowledge?.({ ok: false, error: 'Invalid conversation' });
+    }
   });
   socket.on('leave', (conversationId) => {
     if (!conversationId) return;

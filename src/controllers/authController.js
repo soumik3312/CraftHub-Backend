@@ -8,23 +8,16 @@ const { deleteStoredAsset } = require('../utils/deleteStoredAsset');
 const { sendMail } = require('../utils/mailer');
 const { generateOtpCode, hashOtp, otpCodesMatch, otpExpiryDate } = require('../utils/otpCore');
 
-// Never block the HTTP response on email delivery. If Brevo is misconfigured, log it loudly.
-function queueOtpEmail(sendFn) {
-  setImmediate(() => {
-    sendFn().catch((err) => {
-      console.error('[Craft Hub mail] OTP email FAILED:', err.message);
-      console.error('[Craft Hub mail] Fix .env / Render vars: BREVO_API_KEY, BREVO_FROM_EMAIL, BREVO_FROM_NAME');
-    });
-  });
-}
-
 function signToken(userId) {
   return jwt.sign({ sub: String(userId) }, process.env.JWT_SECRET, { expiresIn: '30d' });
 }
 
 function isEmailVerified(user) {
   if (!user) return false;
-  return user.emailVerified === true;
+  // Accounts that existed before OTP did not store this field. Mongoose applies
+  // the schema default (`false`) while hydrating them, so identify that default
+  // value explicitly and preserve access for those established accounts.
+  return user.emailVerified === true || user.$isDefault?.('emailVerified') === true;
 }
 
 async function persistOtp(email, purpose, plainCode) {
@@ -120,17 +113,22 @@ exports.register = async (req, res) => {
   }
 
   const plain = generateOtpCode();
-  await persistOtp(email, 'register', plain);
-
-  res.status(201).json({
-    needOtp: true,
-    purpose: 'register',
-    email,
-    message: 'We sent a verification code to your email.',
-  });
-
   const regBody = registerEmailBody(plain);
-  queueOtpEmail(() => sendMail({ to: email, subject: regBody.subject, text: regBody.text }));
+  try {
+    await sendMail({ to: email, subject: regBody.subject, text: regBody.text });
+    await persistOtp(email, 'register', plain);
+    res.status(201).json({
+      needOtp: true,
+      purpose: 'register',
+      email,
+      message: 'We sent a verification code to your email.',
+    });
+  } catch (error) {
+    console.error('[Craft Hub mail] Registration OTP delivery failed:', error.message);
+    res.status(502).json({
+      error: 'We could not send the verification email. Please try again later.',
+    });
+  }
 };
 
 exports.verifyRegister = async (req, res) => {
@@ -177,12 +175,17 @@ exports.resendRegister = async (req, res) => {
   if (isEmailVerified(user)) return res.status(400).json({ error: 'Already verified' });
 
   const plain = generateOtpCode();
-  await persistOtp(email, 'register', plain);
-
-  res.json({ ok: true, message: 'New code sent' });
-
   const body = registerEmailBody(plain);
-  queueOtpEmail(() => sendMail({ to: email, subject: body.subject, text: body.text }));
+  try {
+    await sendMail({ to: email, subject: body.subject, text: body.text });
+    await persistOtp(email, 'register', plain);
+    res.json({ ok: true, message: 'New code sent' });
+  } catch (error) {
+    console.error('[Craft Hub mail] Registration OTP resend failed:', error.message);
+    res.status(502).json({
+      error: 'We could not send the verification email. Please try again later.',
+    });
+  }
 };
 
 exports.login = async (req, res) => {
@@ -201,6 +204,10 @@ exports.login = async (req, res) => {
     });
   }
 
+  if (user.$isDefault?.('emailVerified') === true || user.emailVerified === undefined) {
+    user.emailVerified = true;
+    await user.save();
+  }
   await OtpToken.deleteMany({ email, purpose: 'login' });
   const token = signToken(user._id);
   res.json({ token, user: toPublicUser(req, user) });
