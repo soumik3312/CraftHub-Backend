@@ -96,7 +96,14 @@ const uploadRoot = path.join(__dirname, '..', 'uploads');
 app.use('/uploads', express.static(uploadRoot));
 
 app.get('/health', (req, res) => {
-  res.json({ ok: true, service: 'craft-hub-api' });
+  // This reveals configuration presence only, never the client ID itself.
+  // It lets deployment checks distinguish a missing Render variable from a
+  // bad Google client/SHA configuration on the Android device.
+  res.json({
+    ok: true,
+    service: 'craft-hub-api',
+    googleAuthConfigured: Boolean(String(process.env.GOOGLE_WEB_CLIENT_ID || '').trim()),
+  });
 });
 
 app.use('/api/auth', authRoutes);
