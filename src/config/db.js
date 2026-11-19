@@ -19,6 +19,13 @@ async function migrateLegacyEmailVerified() {
   if (r.modifiedCount) {
     console.log(`Migration: set emailVerified=true on ${r.modifiedCount} existing user(s)`);
   }
+  // Explicitly create the sparse unique index for deployments where automatic
+  // Mongoose index creation is disabled. Existing users have no value, so this
+  // does not alter their records or prevent more than one missing field.
+  await User.collection.createIndex(
+    { googleSubject: 1 },
+    { unique: true, sparse: true, name: 'uniq_google_subject' }
+  );
 }
 
 module.exports = { connectDb, migrateLegacyEmailVerified };

@@ -1,5 +1,20 @@
 node_modules/
 .env
+.env.*
+!.env.example
+!.env.*.example
 uploads/
 *.log
 .env.github
+
+# Never commit credentials, service-account keys, or Android/iOS signing keys.
+*-oauth-client-secret*.json
+*oauth-client-secret*.json
+*service-account*.json
+service-account*.json
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+key.properties

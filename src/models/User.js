@@ -6,6 +6,8 @@ const userSchema = new mongoose.Schema(
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     /** false until email OTP verified; existing DB docs without this field are treated as verified on read in auth flows */
     emailVerified: { type: Boolean, default: false },
+    /** Stable Google OpenID Connect `sub`, present only after a verified account link. */
+    googleSubject: { type: String, trim: true },
     passwordHash: { type: String, required: true },
     name: { type: String, required: true, trim: true },
     username: { type: String, required: true, unique: true, lowercase: true, trim: true },
@@ -46,5 +48,7 @@ const userSchema = new mongoose.Schema(
 );
 
 userSchema.index({ name: 'text', username: 'text', bio: 'text' });
+// Sparse keeps existing email/password users (which have no Google field) valid.
+userSchema.index({ googleSubject: 1 }, { unique: true, sparse: true, name: 'uniq_google_subject' });
 
 module.exports = mongoose.model('User', userSchema);

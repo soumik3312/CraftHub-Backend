@@ -5,6 +5,7 @@ function toPublicUser(req, doc) {
   if (!doc) return null;
   const o = doc.toObject ? doc.toObject() : { ...doc };
   delete o.passwordHash;
+  delete o.googleSubject;
   delete o.githubAccessToken;
   delete o.avatarPublicId;
   delete o.avatarResourceType;

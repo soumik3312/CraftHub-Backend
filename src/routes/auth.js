@@ -38,6 +38,13 @@ router.post('/resend-register', strictLimiter, wrap(authController.resendRegiste
 router.post('/login', strictLimiter, wrap(authController.login));
 router.post('/verify-login', otpVerifyLimiter, wrap(authController.verifyLogin));
 router.post('/resend-login', strictLimiter, wrap(authController.resendLogin));
+router.post('/google/register', strictLimiter, wrap(authController.googleRegister));
+router.post(
+  '/google/complete-registration',
+  strictLimiter,
+  wrap(authController.completeGoogleRegistration)
+);
+router.post('/google/login', strictLimiter, wrap(authController.googleLogin));
 router.get('/me', authRequired, wrap(authController.me));
 
 module.exports = router;
