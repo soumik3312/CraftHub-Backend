@@ -197,14 +197,20 @@ exports.login = async (req, res) => {
   if (!ok) return res.status(401).json({ error: 'Invalid credentials' });
 
   if (!isEmailVerified(user)) {
-    return res.status(403).json({
-      error: 'Please verify your email first.',
-      code: 'EMAIL_NOT_VERIFIED',
-      email: user.email,
+    // OTP belongs only to an in-progress new registration. Old mobile accounts
+    // can carry an explicit false default from an earlier schema even though
+    // they predate the web OTP flow, so a valid password must still sign them in.
+    const registrationInProgress = await OtpToken.exists({
+      email,
+      purpose: 'register',
+      expiresAt: { $gt: new Date() },
     });
-  }
-
-  if (user.$isDefault?.('emailVerified') === true || user.emailVerified === undefined) {
+    if (registrationInProgress) {
+      return res.status(403).json({
+        error: 'Finish creating this new account from the sign-up screen.',
+        code: 'SIGNUP_VERIFICATION_PENDING',
+      });
+    }
     user.emailVerified = true;
     await user.save();
   }
